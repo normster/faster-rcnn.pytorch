@@ -90,35 +90,38 @@ def parse_args():
 
 
 def permute_labels(labels, permutation=None):
+    ret = torch.empty_like(labels)
     if permutation:
         # Expects permutation in the form [(a, a'), (b, b'), ...]
         for a, ap in permutation:
-            labels[labels == a] == ap
+            ret[labels == a] = ap
     else:
         for i in range(imdb.num_classes):
-            labels[labels == a] == (a + 1) % imdb.num_classes
+            ret[labels == i] = (i + 1) % imdb.num_classes
+
+    return ret
 
 
 def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
     rois, cls_scores = model(im_data, im_info, gt_boxes, num_boxes, adv_output=True)
 
     # Compute ground truth labels and scores
-    overlaps = bbox_overlaps_batch(rois, gt_boxes)
-    overlap_vals, gt_inds = torch.max(overlaps, 2)
+    overlaps = bbox_overlaps_batch(rois, gt_boxes).squeeze()
+    overlap_vals, gt_inds = torch.max(overlaps, 1)
 
-    cls_scores.squeeze_()
-    gt_assignment.squeeze_()
-
-    gt_labels = gt_boxes[0,gt_inds,5]
-    gt_scores = cls_scores[gt_labels]
+    gt_labels = gt_boxes[0,gt_inds,4].long()
+    gt_scores = torch.gather(cls_scores, 1, gt_labels.view(-1, 1)).squeeze()
 
     # Compute predicted labels and scores
     pred_scores, pred_labels = torch.max(cls_scores, 1)
 
-    return pred_scores, pred_labels, gt_scores, gt_labels
+    # Only keep boxes which satisfy criteria specified in Sec 3.2 Para 3
+    keep_ind = torch.mul(overlap_vals > 0.1, gt_scores > 0.1) 
+
+    return pred_scores[keep_ind], pred_labels[keep_ind], gt_scores[keep_ind], gt_labels[keep_ind]
 
 
-def run_attack(model, data, steps=150, permutation=permutation, gamma=0.5):
+def run_attack(model, data, steps=150, gamma=0.5):
     # Initialize adversarial perturbation to zeros
     im_data, im_info, gt_boxes, num_boxes = data
     im_data, im_info, gt_boxes, num_boxes = im_data.cuda(), im_info.cuda(), gt_boxes.cuda(), num_boxes.cuda()
@@ -126,8 +129,8 @@ def run_attack(model, data, steps=150, permutation=permutation, gamma=0.5):
         im_data.detach_()
         im_data.requires_grad = True
         pred_scores, pred_labels, gt_scores, gt_labels = get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes)
-        adv_labels = permute_labels(true_labels)
-        if torch.all(adv_labels == pred_labels):
+        adv_labels = permute_labels(gt_labels)
+        if (adv_labels == pred_labels).all():
             break
         loss = torch.sum(gt_scores - pred_scores)
         loss.backward()
@@ -254,9 +257,8 @@ if __name__ == '__main__':
     thresh = 0.0
 
   # Set NMS IoU threshold
-  cfg.TEST.RPN_NMS_THRESH = 0.9
-  cfg.TRAIN.RPN_NMS_THRESH = 0.9
-  cfg.TEST.RPN_POST_NMS_TOP_N = 6000
+  cfg_vals = (cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N)
+  cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = (0.9, 0.9, 3000)
 
   save_name = 'faster_rcnn_10'
   num_images = len(imdb.image_index)
@@ -285,8 +287,12 @@ if __name__ == '__main__':
                             pin_memory=True)
 
   adv_im_data = []
-  for data in adv_dataloader:
-      adv_im_data.append(run_attack(data).cpu())
+  total_ims = len(adv_dataloader)
+  for i, data in enumerate(adv_dataloader):
+      print("Attacking image {} / {}".format(i, total_ims))
+      adv_im_data.append(run_attack(fasterRCNN, data).cpu())
+
+  cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = cfg_vals
 
   for i in range(num_images):
 
