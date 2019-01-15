@@ -121,23 +121,34 @@ def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
     return pred_scores[keep_ind], pred_labels[keep_ind], gt_scores[keep_ind], gt_labels[keep_ind]
 
 
-def run_attack(model, data, steps=150, gamma=0.5):
-    # Initialize adversarial perturbation to zeros
+def run_attack(model, data, steps=25, eps=0.05):
     im_data, im_info, gt_boxes, num_boxes = data
     im_data, im_info, gt_boxes, num_boxes = im_data.cuda(), im_info.cuda(), gt_boxes.cuda(), num_boxes.cuda()
-    for i in range(steps):
-        im_data.detach_()
-        im_data.requires_grad = True
-        pred_scores, pred_labels, gt_scores, gt_labels = get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes)
-        adv_labels = permute_labels(gt_labels)
-        if (adv_labels == pred_labels).all():
-            break
-        loss = torch.sum(gt_scores - pred_scores)
-        loss.backward()
-        r = im_data.grad.data
-        im_data.data = im_data.data - gamma / torch.norm(r) * r
+    #eps = torch.zeros_like(im_data).cuda()
+    im_data.detach_()
+    im_data.requires_grad = True
+    pred_scores, pred_labels, gt_scores, gt_labels = get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes)
+    adv_labels = permute_labels(gt_labels)
+    loss = torch.sum(gt_scores - pred_scores)
+    loss.backward()
+    update = -eps * torch.sign(im_data.grad.data)
+    im_data.data += update
 
-    return im_data.detach()
+    #for i in range(steps):
+    #    im_data.detach_()
+    #    im_data.requires_grad = True
+    #    pred_scores, pred_labels, gt_scores, gt_labels = get_boxes_labels(model, im_data + eps, im_info, gt_boxes, num_boxes)
+    #    adv_labels = permute_labels(gt_labels)
+    #    if (adv_labels == pred_labels).all():
+    #        break
+    #    loss = torch.sum(gt_scores - pred_scores)
+    #    loss.backward()
+    #    r = im_data.grad.data
+    #    update = - gamma / torch.norm(r) * r
+    #    im_data.data += update 
+    #    eps += update
+
+    return im_data.detach().cpu(), eps.detach().cpu()
 
 
 lr = cfg.TRAIN.LEARNING_RATE
@@ -289,8 +300,9 @@ if __name__ == '__main__':
   adv_im_data = []
   total_ims = len(adv_dataloader)
   for i, data in enumerate(adv_dataloader):
-      print("Attacking image {} / {}".format(i, total_ims))
-      adv_im_data.append(run_attack(fasterRCNN, data).cpu())
+      adv_im, eps = run_attack(fasterRCNN, data)
+      adv_im_data.append(adv_im)
+      print("Image {} / {}\tAttack norm (p=2): {}\tAttack norm (p=inf): {}".format(i, total_ims, torch.norm(eps), torch.norm(eps, float('inf'))))
 
   cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = cfg_vals
 
