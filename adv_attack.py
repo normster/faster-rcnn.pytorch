@@ -51,16 +51,13 @@ def parse_args():
                       default='cfgs/vgg16.yml', type=str)
   parser.add_argument('--net', dest='net',
                       help='vgg16, res50, res101, res152',
-                      default='res101', type=str)
+                      default='vgg16', type=str)
   parser.add_argument('--set', dest='set_cfgs',
                       help='set config keys', default=None,
                       nargs=argparse.REMAINDER)
   parser.add_argument('--load_dir', dest='load_dir',
                       help='directory to load models', default="models",
                       type=str)
-  parser.add_argument('--cuda', dest='cuda',
-                      help='whether use CUDA',
-                      action='store_true')
   parser.add_argument('--ls', dest='large_scale',
                       help='whether use large imag scale',
                       action='store_true')
@@ -78,7 +75,7 @@ def parse_args():
                       default=1, type=int)
   parser.add_argument('--checkepoch', dest='checkepoch',
                       help='checkepoch to load network',
-                      default=1, type=int)
+                      default=6, type=int)
   parser.add_argument('--checkpoint', dest='checkpoint',
                       help='checkpoint to load network',
                       default=10021, type=int)
@@ -140,7 +137,7 @@ def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
     return pred_scores[keep_ind], pred_labels[keep_ind], gt_scores[keep_ind], gt_labels[keep_ind]
 
 
-def run_attack(model, data, steps=5, gamma=0.5):
+def run_attack(model, data, steps=1, gamma=0.5):
     im_data, im_info, gt_boxes, num_boxes = data
     im_data, im_info, gt_boxes, num_boxes = im_data.cuda(), im_info.cuda(), gt_boxes.cuda(), num_boxes.cuda()
     eps = torch.zeros_like(im_data).cuda()
@@ -170,9 +167,6 @@ if __name__ == '__main__':
 
   print('Called with args:')
   print(args)
-
-  if torch.cuda.is_available() and not args.cuda:
-    print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
   np.random.seed(cfg.RNG_SEED)
   if args.dataset == "pascal_voc":
@@ -247,12 +241,10 @@ if __name__ == '__main__':
   num_boxes = torch.LongTensor(1)
   gt_boxes = torch.FloatTensor(1)
 
-  # ship to cuda
-  if args.cuda:
-    im_data = im_data.cuda()
-    im_info = im_info.cuda()
-    num_boxes = num_boxes.cuda()
-    gt_boxes = gt_boxes.cuda()
+  im_data = im_data.cuda()
+  im_info = im_info.cuda()
+  num_boxes = num_boxes.cuda()
+  gt_boxes = gt_boxes.cuda()
 
   # make variable
   im_data = Variable(im_data)
@@ -260,11 +252,9 @@ if __name__ == '__main__':
   num_boxes = Variable(num_boxes)
   gt_boxes = Variable(gt_boxes)
 
-  if args.cuda:
-    cfg.CUDA = True
+  cfg.CUDA = True
 
-  if args.cuda:
-    fasterRCNN.cuda()
+  fasterRCNN.cuda()
 
   start = time.time()
   max_per_image = 100
