@@ -121,16 +121,12 @@ def permute_labels(labels, permutation=None):
 def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
     rois, cls_scores = model(im_data, im_info, gt_boxes, num_boxes, adv_output=True)
     
-    #print(rois.size(), cls_scores.size())
-    #print(rois[0,:,0])
-    #shabi
 
     # Compute ground truth labels and scores
     overlaps = bbox_overlaps_batch(rois, gt_boxes).squeeze()
     overlap_vals, gt_inds = torch.max(overlaps, 1)
     
     gt_labels = gt_boxes[0,gt_inds,4].long()
-    # print(gt_boxes.size(), gt_labels.size())
     gt_scores = torch.gather(cls_scores, 1, gt_labels.view(-1, 1)).squeeze()
 
     # Compute predicted labels and scores
@@ -138,10 +134,7 @@ def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
 
     # Only keep boxes which satisfy criteria specified in Sec 3.2 Para 3
     keep_ind = torch.mul(overlap_vals > 0.1, gt_scores > 0.1) 
-    #print(keep_ind[:100])
     keep_ind = torch.mul(keep_ind, (pred_labels == gt_labels))
-    #print(keep_ind[:100])
-    #print(keep_ind.size(), pred_labels.size(), gt_labels.size())
     # those all the Proposals we want to attack
     pred_scores = pred_scores[keep_ind]
     pred_labels = pred_labels[keep_ind]
@@ -165,7 +158,8 @@ def run_attack(model, data, steps=150, gamma=0.5):
     im_data, im_info, gt_boxes, num_boxes = data
     im_data, im_info, gt_boxes, num_boxes = im_data.cuda(), im_info.cuda(), gt_boxes.cuda(), num_boxes.cuda()
     eps = torch.zeros_like(im_data).cuda()
-
+    if len(list(gt_boxes.size())) == 2:
+        return eps.detach().cpu(), 0
     # set target labels
 
     for i in range(steps):
@@ -188,7 +182,7 @@ def run_attack(model, data, steps=150, gamma=0.5):
         eps.grad *= 0.
         if i % 10 == 0:
             print('***** iter %d' % i)
-    return eps.detach().cpu()
+    return eps.detach().cpu(), i
 
 
 lr = cfg.TRAIN.LEARNING_RATE
@@ -212,8 +206,10 @@ if __name__ == '__main__':
       args.imdbval_name = "voc_2007_test"
       args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "coco":
-      args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
-      args.imdbval_name = "coco_2014_minival"
+      #args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
+      #args.imdbval_name = "coco_2014_minival"
+      args.imdb_name = "coco_2014_train"
+      args.imdbval_name = "coco_2014_val"
       args.set_cfgs = ['ANCHOR_SCALES', '[4, 8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "imagenet":
       args.imdb_name = "imagenet_train"
@@ -302,7 +298,7 @@ if __name__ == '__main__':
 
   # Set NMS IoU threshold
   cfg_vals = (cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N)
-  cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = (0.9, 0.9, 3000)
+  cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = (0.9, 0.9, 2000)
 
   save_name = 'faster_rcnn_10'
   num_images = len(imdb.image_index)
@@ -311,7 +307,7 @@ if __name__ == '__main__':
 
   output_dir = get_output_dir(imdb, save_name)
   dataset = roibatchLoader(roidb, ratio_list, ratio_index, 1, \
-                        imdb.num_classes, normalize = False)
+                        imdb.num_classes, training=False, normalize = False)
   dataloader = torch.utils.data.DataLoader(dataset, batch_size=1,
                             shuffle=False, num_workers=0,
                             pin_memory=True)
@@ -325,7 +321,7 @@ if __name__ == '__main__':
   empty_array = np.transpose(np.array([[],[],[],[],[]]), (1,0))
 
   adv_dataset = roibatchLoader(roidb, ratio_list, ratio_index, 1,
-                            imdb.num_classes, training=True, normalize = False)
+                            imdb.num_classes, training=False, normalize = False)
   adv_dataloader = torch.utils.data.DataLoader(adv_dataset, batch_size=1,
                             shuffle=False, num_workers=0,
                             pin_memory=True)
@@ -335,25 +331,36 @@ if __name__ == '__main__':
 
   attack_total = 100 
 
-
+  adv_pert = []
+  adv_iter = []
   #adv_data_iter = iter(adv_dataloader)
   #for i in range(attack_total):
   #    data = next(adv_data_iter)
+  attack_start = time.time()
   for i, data in enumerate(adv_dataloader):
       if i == attack_total:
           break
       print('Current Image %d' % i)
-      eps = run_attack(fasterRCNN, data)
+      eps, iters = run_attack(fasterRCNN, data)
       im = truncate_images(data[0] + eps)
       adv_im_data.append(im)
-      print("Image {} / {}\tAttack norm (p=2): {}\tAttack norm (p=inf): {}".format(i, total_ims, torch.norm(eps), torch.norm(eps, float('inf'))))
+      adv_pert.append(torch.norm((im-data[0])).item())
+      adv_iter.append(iters)
+      print("Image {} / {}\tAttack norm (p=2): {}\tAttack norm (p=inf): {}".format(i, total_ims, torch.norm(im-data[0]), torch.norm(im-data[0], float('inf'))))
+
+  print(adv_pert)
+  print(adv_iter)
+  print('attack time: ', time.time()-attack_start)
 
   cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = cfg_vals
 
   for i in range(attack_total):
 
       data = next(data_iter)
+      #print(data[0].size(), adv_im_data[i].size())
+      #data[0].data = adv_im_data[i].data().cuda()
       im_data = adv_im_data[i].cuda()
+      #im_data.data.resize_(data[0].size())
       im_info.data.resize_(data[1].size()).copy_(data[1])
       gt_boxes.data.resize_(data[2].size()).copy_(data[2])
       num_boxes.data.resize_(data[3].size()).copy_(data[3])
@@ -445,8 +452,8 @@ if __name__ == '__main__':
   with open(det_file, 'wb') as f:
       pickle.dump(all_boxes, f, pickle.HIGHEST_PROTOCOL)
 
-  #print('Evaluating detections')
-  #imdb.evaluate_detections(all_boxes, output_dir)
+  print('Evaluating detections')
+  imdb.evaluate_detections(all_boxes, output_dir)
 
   end = time.time()
   print("test time: %0.4fs" % (end - start))

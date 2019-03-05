@@ -49,10 +49,11 @@ def parse_args():
                       default='pascal_voc', type=str)
   parser.add_argument('--cfg', dest='cfg_file',
                       help='optional config file',
-                      default='cfgs/vgg16.yml', type=str)
+                      default='cfgs/resnet101_ls.yml', type=str)
+                      #default='cfgs/vgg16.yml', type=str)
   parser.add_argument('--net', dest='net',
                       help='vgg16, res50, res101, res152',
-                      default='res101', type=str)
+                      default='vgg16', type=str)
   parser.add_argument('--set', dest='set_cfgs',
                       help='set config keys', default=None,
                       nargs=argparse.REMAINDER)
@@ -79,7 +80,7 @@ def parse_args():
                       default=1, type=int)
   parser.add_argument('--checkepoch', dest='checkepoch',
                       help='checkepoch to load network',
-                      default=1, type=int)
+                      default=6, type=int)
   parser.add_argument('--checkpoint', dest='checkpoint',
                       help='checkpoint to load network',
                       default=10021, type=int)
@@ -113,8 +114,10 @@ if __name__ == '__main__':
       args.imdbval_name = "voc_2007_test"
       args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "coco":
-      args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
-      args.imdbval_name = "coco_2014_minival"
+      #args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
+      #args.imdbval_name = "coco_2014_minival"
+      args.imdb_name = "coco_2014_train"
+      args.imdbval_name = "coco_2014_val"
       args.set_cfgs = ['ANCHOR_SCALES', '[4, 8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "imagenet":
       args.imdb_name = "imagenet_train"
@@ -158,7 +161,7 @@ if __name__ == '__main__':
     fasterRCNN = resnet(imdb.classes, 152, pretrained=False, class_agnostic=args.class_agnostic)
   else:
     print("network is not defined")
-    pdb.set_trace()
+    #pdb.set_trace()
 
   fasterRCNN.create_architecture()
 
@@ -216,7 +219,6 @@ if __name__ == '__main__':
   dataloader = torch.utils.data.DataLoader(dataset, batch_size=1,
                             shuffle=False, num_workers=0,
                             pin_memory=True)
-
   data_iter = iter(dataloader)
 
   _t = {'im_detect': time.time(), 'misc': time.time()}
@@ -224,6 +226,9 @@ if __name__ == '__main__':
 
   fasterRCNN.eval()
   empty_array = np.transpose(np.array([[],[],[],[],[]]), (1,0))
+
+  num_images = 100
+
   for i in range(num_images):
 
       data = next(data_iter)
@@ -231,7 +236,7 @@ if __name__ == '__main__':
       im_info.data.resize_(data[1].size()).copy_(data[1])
       gt_boxes.data.resize_(data[2].size()).copy_(data[2])
       num_boxes.data.resize_(data[3].size()).copy_(data[3])
-
+      #print(im_info)
       det_tic = time.time()
       rois, cls_prob, bbox_pred, \
       rpn_loss_cls, rpn_loss_box, \
@@ -311,8 +316,8 @@ if __name__ == '__main__':
       sys.stdout.flush()
 
       if vis:
-          cv2.imwrite('result.png', im2show)
-          pdb.set_trace()
+          cv2.imwrite('ori_image/result'+str(i)+'.png', im2show)
+          #pdb.set_trace()
           #cv2.imshow('test', im2show)
           #cv2.waitKey(0)
 

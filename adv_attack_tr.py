@@ -26,7 +26,7 @@ from roi_data_layer.roibatchLoader import roibatchLoader
 from model.utils.config import cfg, cfg_from_file, cfg_from_list, get_output_dir
 from model.rpn.bbox_transform import clip_boxes
 from model.nms.nms_wrapper import nms
-from model.rpn.bbox_transform import bbox_transform_inv, bbox_overlaps_batch
+from model.rpn.bbox_transform import bbox_transform_inv, bbox_overlaps_batch, bbox_overlaps
 from model.utils.net_utils import save_net, load_net, vis_detections
 from model.faster_rcnn.vgg16 import vgg16
 from model.faster_rcnn.resnet import resnet
@@ -118,15 +118,22 @@ def permute_labels(labels, permutation=None):
     return ret
 
 
+def get_second_class(scores):
+    # get the indix of the second class which is not background
+    _, preds = scores.topk(3, 1, True, True)
+    output = preds[:, 1]
+    # do not attack background
+    back_ground = (output == 0)
+    mask = back_ground.nonzero().view(-1)
+    output[mask] = preds[mask, 2]
+    return output
 def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
     rois, cls_scores = model(im_data, im_info, gt_boxes, num_boxes, adv_output=True)
-
     # Compute ground truth labels and scores
     overlaps = bbox_overlaps_batch(rois, gt_boxes).squeeze()
     overlap_vals, gt_inds = torch.max(overlaps, 1)
     
     gt_labels = gt_boxes[0,gt_inds,4].long()
-    # print(gt_boxes.size(), gt_labels.size())
     gt_scores = torch.gather(cls_scores, 1, gt_labels.view(-1, 1)).squeeze()
 
     # Compute predicted labels and scores
@@ -134,27 +141,68 @@ def get_boxes_labels(model, im_data, im_info, gt_boxes, num_boxes):
 
     # Only keep boxes which satisfy criteria specified in Sec 3.2 Para 3
     keep_ind = torch.mul(overlap_vals > 0.1, gt_scores > 0.1) 
+    keep_ind = torch.mul(keep_ind, (pred_labels == gt_labels))
+    # those all the Proposals we want to attack
+    pred_scores = pred_scores[keep_ind]
+    pred_labels = pred_labels[keep_ind]
+    gt_scores = gt_scores[keep_ind]
+    gt_labels = gt_labels[keep_ind]
+    #print(gt_labels.size())
+    # new test 
+    #rois_flatten = rois[0,:,1:].view(-1, 4)
+    #rois_flatten = rois_flatten[keep_ind, :]
+    #print(rois_flatten.size())
+    #rois_overlap = bbox_overlaps(rois_flatten, rois_flatten)
+    #print(rois_overlap.size())
+    #print(rois_overlap[:10, :10])
+    #asdf
 
-    return pred_scores[keep_ind], pred_labels[keep_ind], gt_scores[keep_ind], gt_labels[keep_ind]
+    if gt_labels.size(0) == 0:
+        return 0, 0, 0, 0, 0, 0, 0, True
+    #print(cls_scores.size())
+    cls_scores = cls_scores[keep_ind]
+    #print(cls_scores.size())
+    # For TR attack, we will attack the second predict class.
+    # adv_labels = permute_labels(gt_labels) 
+    adv_labels = get_second_class(cls_scores)
+    adv_scores = cls_scores[range(adv_labels.size(0)), adv_labels]
+    #print(adv_scores.size())
+    return adv_scores, adv_labels, pred_scores, pred_labels, gt_scores, gt_labels, gt_labels.size(0), False
 
 
-def run_attack(model, data, steps=1, gamma=0.5):
+def run_attack(model, data, steps=150, gamma=0.5):
     im_data, im_info, gt_boxes, num_boxes = data
     im_data, im_info, gt_boxes, num_boxes = im_data.cuda(), im_info.cuda(), gt_boxes.cuda(), num_boxes.cuda()
     eps = torch.zeros_like(im_data).cuda()
 
+    # set target labels
+    original_correct = None
     for i in range(steps):
         eps.detach_()
         eps.requires_grad = True
-        pred_scores, pred_labels, gt_scores, gt_labels = get_boxes_labels(model, im_data + eps, im_info, gt_boxes, num_boxes)
-        adv_labels = permute_labels(gt_labels)
-        if (adv_labels == pred_labels).all():
+        adv_scores, adv_labels, pred_scores, pred_labels, gt_scores, gt_labels, correct_labels, _flag = get_boxes_labels(model, im_data + eps, im_info, gt_boxes, num_boxes)
+                
+        #adv_labels = permute_labels(gt_labels)
+        if _flag == True:
+            print('There is no good proposals %d iters' % i)
             break
-        loss = torch.sum(gt_scores - pred_scores)
+        
+        # we think we only need to attack some boxes, that should be enough
+        if original_correct is None:
+            original_correct = correct_labels
+            print('regions need to be attack: ', correct_labels)
+        else:
+            if correct_labels < correct_labels / 2:
+                print('The correct labels is below half. %d iters' % i)
+                break
+        loss = torch.sum(adv_scores - gt_scores)
         loss.backward()
         r = eps.grad.data
-        eps.data -= gamma / torch.norm(r) * r
-    print('***** iter %d' % i)
+        eps.data += gamma / torch.max(torch.abs(r)) * r
+        # we need to clean the gradient after update
+        eps.grad *= 0.
+        if i % 10 == 0:
+            print('***** iter %d' % i)
     return eps.detach().cpu()
 
 
@@ -179,8 +227,10 @@ if __name__ == '__main__':
       args.imdbval_name = "voc_2007_test"
       args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "coco":
-      args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
-      args.imdbval_name = "coco_2014_minival"
+      #args.imdb_name = "coco_2014_train+coco_2014_valminusminival"
+      #args.imdbval_name = "coco_2014_minival"
+      args.imdb_name = "coco_2014_train"
+      args.imdbval_name = "coco_2014_val"
       args.set_cfgs = ['ANCHOR_SCALES', '[4, 8, 16, 32]', 'ANCHOR_RATIOS', '[0.5,1,2]']
   elif args.dataset == "imagenet":
       args.imdb_name = "imagenet_train"
@@ -224,7 +274,7 @@ if __name__ == '__main__':
     fasterRCNN = resnet(imdb.classes, 152, pretrained=False, class_agnostic=args.class_agnostic)
   else:
     print("network is not defined")
-    pdb.set_trace()
+    #pdb.set_trace()
 
   fasterRCNN.create_architecture()
 
@@ -269,7 +319,9 @@ if __name__ == '__main__':
 
   # Set NMS IoU threshold
   cfg_vals = (cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N)
-  cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = (0.9, 0.9, 3000)
+  # Hope that TR do not need so many proposals
+  # cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = (0.9, 0.9, 3000)
+  # cfg.TEST.RPN_POST_NMS_TOP_N = 100
 
   save_name = 'faster_rcnn_10'
   num_images = len(imdb.image_index)
@@ -299,7 +351,17 @@ if __name__ == '__main__':
 
   adv_im_data = []
   total_ims = len(adv_dataloader)
+
+  attack_total = 100
+
+
+  #adv_data_iter = iter(adv_dataloader)
+  #for i in range(attack_total):
+  #    data = next(adv_data_iter)
   for i, data in enumerate(adv_dataloader):
+      if i == attack_total:
+          break
+      print('Current Image %d' % i)
       eps = run_attack(fasterRCNN, data)
       im = truncate_images(data[0] + eps)
       adv_im_data.append(im)
@@ -307,7 +369,7 @@ if __name__ == '__main__':
 
   cfg.TEST.RPN_NMS_THRESH, cfg.TRAIN.RPN_NMS_THRESH, cfg.TEST.RPN_POST_NMS_TOP_N = cfg_vals
 
-  for i in range(num_images):
+  for i in range(attack_total):
 
       data = next(data_iter)
       im_data = adv_im_data[i].cuda()
@@ -394,8 +456,8 @@ if __name__ == '__main__':
       sys.stdout.flush()
 
       if vis:
-          cv2.imwrite('result.png', im2show)
-          pdb.set_trace()
+          cv2.imwrite('adv_image/result'+str(i)+'.png', im2show)
+          #pdb.set_trace()
           #cv2.imshow('test', im2show)
           #cv2.waitKey(0)
 
